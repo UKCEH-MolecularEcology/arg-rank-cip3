@@ -202,7 +202,6 @@ theme_met_classic <- function(){
 
 # Figure 1 -- alpha diversity and PCoA
 
-cat("\n================ FIGURE 1 ================\n")
 
 arg_long <- read.csv(
   "all_ARG_counts.csv",
@@ -445,26 +444,23 @@ save_fig(
 
 # Figure 2 -- MC2 Risk Scores
 
-cat("\n================ FIGURE 2 ================\n")
 
-df_rain <- read_excel(
-  "full_merged_dataset.xlsx"
-) %>%
+df <- read_excel("full_merged_dataset.xlsx") %>%
   rename(
     PlantID = Site,
-    MonthID = `Sample Round`
+    MonthID = `Sample Round`,
+    Sample = sample_id,
+    Group = Group.x
   ) %>%
   mutate(
     MonthID = factor(MonthID),
 
     Group = case_when(
-      str_to_lower(Group.x) == "influent" ~ "Influent",
+      str_to_lower(Group) == "influent" ~ "Influent",
       TRUE ~ "Effluent"
     ),
 
-    ScoreType = str_to_title(
-      str_trim(ScoreType)
-    ),
+    ScoreType = str_to_title(str_trim(ScoreType)),
 
     ScoreTypeLabel = recode(
       ScoreType,
@@ -477,19 +473,41 @@ df_rain <- read_excel(
     ScoreTypeLabel %in% c("ERR", "HHRR")
   )
 
-df_rain$Group <- factor(
-  df_rain$Group,
-  levels = c(
-    "Influent",
-    "Effluent"
-  )
+df$Group <- factor(
+  df$Group,
+  levels = c("Influent", "Effluent")
 )
+
+run_mixed_model <- function(score_label){
+
+  sub <- df %>%
+    filter(ScoreTypeLabel == score_label)
+
+  model <- lmer(
+    RiskScore ~ Group + (1 | PlantID / MonthID),
+    data = sub
+  )
+
+  tidy(model, effects = "fixed") %>%
+    filter(term == "GroupEffluent") %>%
+    mutate(ScoreTypeLabel = score_label)
+}
+
+mixed_ERR  <- run_mixed_model("ERR")
+mixed_HHRR <- run_mixed_model("HHRR")
+
+mixed_results <- bind_rows(
+  mixed_ERR,
+  mixed_HHRR
+)
+
+print("Mixed-effects model results")
+print(mixed_results)
 
 rain_plot <- function(score){
 
   ggplot(
-    df_rain %>%
-      filter(ScoreTypeLabel == score),
+    df %>% filter(ScoreTypeLabel == score),
 
     aes(
       x = Group,
@@ -535,31 +553,11 @@ rain_plot <- function(score){
 rain_ERR <- rain_plot("ERR")
 rain_HHRR <- rain_plot("HHRR")
 
-# Paired data
-
-df_pair <- read_excel(
-  "full_merged_dataset.xlsx"
-) %>%
-  rename(
-    Sample = sample_id,
-    Group = Group.x
-  ) %>%
-  mutate(
-    ScoreType = str_to_title(
-      str_trim(ScoreType)
-    ),
-
-    Group = case_when(
-      str_to_lower(Group) == "influent" ~ "Influent",
-      TRUE ~ "Effluent"
-    )
-  )
-
-paired <- df_pair %>%
+paired <- df %>%
   select(
-    Site,
-    Sample_Round = `Sample Round`,
-    ScoreType,
+    PlantID,
+    MonthID,
+    ScoreTypeLabel,
     Group,
     RiskScore
   ) %>%
@@ -575,12 +573,43 @@ paired <- df_pair %>%
     Delta = Effluent - Influent
   )
 
+paired_stats <- function(score_label){
+
+  sub <- paired %>%
+    filter(ScoreTypeLabel == score_label)
+
+  wil <- wilcox.test(
+    sub$Effluent,
+    sub$Influent,
+    paired = TRUE
+  )
+
+  tibble(
+    ScoreTypeLabel = score_label,
+    Median_Influent = median(sub$Influent),
+    Median_Effluent = median(sub$Effluent),
+    Median_Delta = median(sub$Delta),
+    Wilcoxon_p = wil$p.value
+  )
+}
+
+paired_ERR  <- paired_stats("ERR")
+paired_HHRR <- paired_stats("HHRR")
+
+paired_results <- bind_rows(
+  paired_ERR,
+  paired_HHRR
+)
+
+print("Paired influent–effluent results")
+print(paired_results)
+
 delta_max <- max(abs(paired$Delta))
 
 plot_score <- function(score_type){
 
   sub <- paired %>%
-    filter(ScoreType == score_type)
+    filter(ScoreTypeLabel == score_type)
 
   slopes <- ggplot(sub) +
 
@@ -695,8 +724,8 @@ plot_score <- function(score_type){
 }
 
 plots <- list(
-  plot_score("Ecological"),
-  plot_score("Human Health")
+  plot_score("ERR"),
+  plot_score("HHRR")
 )
 
 fig2 <-
@@ -728,9 +757,39 @@ save_fig(
   height = 6.5
 )
 
-# Figure 3 -- Site-Level Risk Scores
 
-cat("\n================ FIGURE 3 ================\n")
+for(row in 1:nrow(mixed_results)){
+
+  r <- mixed_results[row, ]
+
+  cat(
+    r$ScoreTypeLabel,
+    ": β = ",
+    round(r$estimate, 2),
+    ", p = ",
+    format(r$p.value, scientific = TRUE),
+    "\n",
+    sep = ""
+  )
+}
+
+for(row in 1:nrow(paired_results)){
+
+  r <- paired_results[row, ]
+
+  cat(
+    r$ScoreTypeLabel,
+    ": median Δ = ",
+    round(r$Median_Delta, 2),
+    ", Wilcoxon p = ",
+    format(r$Wilcoxon_p, scientific = TRUE),
+    "\n",
+    sep = ""
+  )
+}
+
+
+# Figure 3 -- Site-Level Risk Scores
 
 df_raw <- read_csv(
   "arg_metacompare_scores.csv",
@@ -758,6 +817,12 @@ df <- df_raw %>%
       trimws(ScoreType)
     ),
 
+    ScoreType = recode(
+      ScoreType,
+      "Ecological" = "ERR",
+      "Human Health" = "HHRR"
+    ),
+
     Group = factor(
       Group,
       levels = c(
@@ -765,16 +830,9 @@ df <- df_raw %>%
         "Effluent"
       )
     )
-  ) %>%
-  mutate(
-    ScoreType = recode(
-      ScoreType,
-      "Ecological" = "ERR",
-      "Human Health" = "HHRR"
-    )
   )
 
-# Site mapping
+
 
 site_mapping <- c(
   "E105"="Driffield","E108"="Driffield","E111"="Exmouth",
@@ -833,6 +891,62 @@ df$Site <- site_mapping[df$sample_id]
 df <- df %>%
   filter(!is.na(Site))
 
+run_mixed <- function(score){
+
+  sub <- df %>%
+    filter(ScoreType == score)
+
+  model <- lmer(
+    RiskScore ~ Group + (1 | Site),
+    data = sub
+  )
+
+  tidy(model, effects = "fixed") %>%
+    filter(term == "GroupEffluent")
+}
+
+mixed_ERR  <- run_mixed("ERR")
+mixed_HHRR <- run_mixed("HHRR")
+
+mixed_results <- bind_rows(
+  mixed_ERR,
+  mixed_HHRR
+)
+
+print("Mixed-effects model results")
+print(mixed_results)
+
+wilcox_by_site <- df %>%
+  group_by(Site, ScoreType) %>%
+  summarise(
+    p = tryCatch(
+      wilcox.test(RiskScore ~ Group)$p.value,
+      error = function(e) NA
+    ),
+    .groups = "drop"
+  )
+
+print("=== Per-site Wilcoxon tests ===")
+print(wilcox_by_site)
+
+df_for_signif <- df %>%
+  group_by(Site, ScoreType) %>%
+  summarise(
+    p = tryCatch(
+      wilcox.test(RiskScore ~ Group)$p.value,
+      error = function(e) NA
+    ),
+
+    y = max(RiskScore, na.rm = TRUE) * 1.05,
+
+    .groups = "drop"
+  ) %>%
+  mutate(
+    group1 = "Influent",
+    group2 = "Effluent",
+    label = sprintf("p = %.3g", p)
+  )
+
 p3 <- ggplot(
   df,
   aes(
@@ -845,8 +959,7 @@ p3 <- ggplot(
   geom_boxplot(
     outlier.shape = NA,
     alpha = 0.7,
-    color = "black",
-    linewidth = 0.8
+    color = "black"
   ) +
 
   geom_jitter(
@@ -871,13 +984,13 @@ p3 <- ggplot(
     color = met_cols$neutral["mid"]
   ) +
 
-  geom_signif(
-    comparisons = list(
-      c("Influent", "Effluent")
-    ),
-    map_signif_level = TRUE,
-    textsize = 4,
-    tip_length = 0
+  stat_pvalue_manual(
+    df_for_signif,
+    label = "label",
+    xmin = "group1",
+    xmax = "group2",
+    y.position = "y",
+    tip.length = 0
   ) +
 
   labs(
@@ -901,9 +1014,14 @@ save_fig(
   height = 10
 )
 
+cat("\n================ SUMMARY ================\n")
+
+print(mixed_results)
+print(wilcox_by_site)
+
+
 # Figure 4 -- Physicochemical vs RiskScore
 
-cat("\n================ FIGURE 4 ================\n")
 
 full_merged_dataset <- read_excel(
   "full_merged_dataset.xlsx"
@@ -1122,8 +1240,6 @@ save_fig(
 
 # Figure 5 -- ESKAPEE Burden
 
-cat("\n================ FIGURE 5 ================\n")
-
 esk <- read_tsv(
   "ESKAPEE_combined.tsv",
   col_names = FALSE,
@@ -1296,11 +1412,9 @@ save_fig(
 
 # COMPLETE
 
-cat("\n==========================================\n")
-cat("All figures generated:\n")
 cat("  METFIG1.png\n")
 cat("  METFIG2.png\n")
 cat("  METFIG3.png\n")
 cat("  METFIG4.png\n")
 cat("  METFIG5.png\n")
-cat("==========================================\n")
+
